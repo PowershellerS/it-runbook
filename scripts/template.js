@@ -14,6 +14,7 @@
     alert: '<path d="M12 4 3 20h18L12 4Z"/><path d="M12 10.5v3.2" stroke-linecap="round"/><circle cx="12" cy="16.7" r="0.9" fill="currentColor" stroke="none"/>',
     network: '<circle cx="12" cy="4.5" r="2"/><circle cx="5" cy="18" r="2"/><circle cx="19" cy="18" r="2"/><path d="M12 6.5v4M12 10.5 5 16M12 10.5l7 5.5"/>'
   };
+  var ICON_KEYS = ['book','wrench','users','server','shield','cloud','database','lock','alert','network'];
   function svgIcon(key){ var d = ICONS[key] || ICONS.book; return '<svg viewBox="0 0 24 24" fill="none" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round">'+d+'</svg>'; }
   function escapeHtml(s){ return String(s).replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;').replace(/"/g,'&quot;').replace(/'/g,'&#39;'); }
   function el(tag, attrs, html){ var e=document.createElement(tag); if(attrs) for(var k in attrs) e.setAttribute(k, attrs[k]); if(html!==undefined) e.innerHTML=html; return e; }
@@ -25,10 +26,46 @@
     return d.toLocaleDateString(undefined,{month:'short', day:'numeric', year:'numeric'});
   }
   function excerpt(s,n){ s=(s||'').replace(/<[^>]*>/g,'').replace(/\s+/g,' ').trim(); return s.length>n? s.slice(0,n).trim()+'…' : s; }
+  function uniq(arr){ return arr.filter(function(v,i){ return arr.indexOf(v)===i; }); }
+  function showToast(msg, ms){
+    var t = document.getElementById('toast');
+    t.textContent = msg; t.classList.add('show');
+    clearTimeout(t._h); t._h = setTimeout(function(){ t.classList.remove('show'); }, ms||3200);
+  }
 
   var state = { view:{type:'home'}, search:'' };
   function catById(id){ return DATA.categories.find(function(c){return c.id===id;}); }
 
+  // ---------------- GitHub API (client-side, uses the viewer's own token) ----------------
+  var GH_TOKEN_KEY = 'runbook_gh_token';
+  function getToken(){ try{ return localStorage.getItem(GH_TOKEN_KEY) || ''; }catch(e){ return ''; } }
+  function setToken(t){ try{ localStorage.setItem(GH_TOKEN_KEY, t); }catch(e){} }
+  function clearToken(){ try{ localStorage.removeItem(GH_TOKEN_KEY); }catch(e){} }
+  function repoConfigured(){ return !!(DATA.repo && DATA.repo.owner && DATA.repo.name); }
+  function apiBase(){ return 'https://api.github.com/repos/'+DATA.repo.owner+'/'+DATA.repo.name; }
+  function b64EncodeUtf8(str){ return btoa(unescape(encodeURIComponent(str))); }
+  function b64DecodeUtf8(str){ return decodeURIComponent(escape(atob(str.replace(/\n/g,'')))); }
+  function slugify(s){ return String(s).toLowerCase().trim().replace(/[^a-z0-9]+/g,'-').replace(/^-+|-+$/g,'').slice(0,60) || 'untitled'; }
+  function yamlStr(s){ return '"'+String(s==null?'':s).replace(/\\/g,'\\\\').replace(/"/g,'\\"')+'"'; }
+
+  function ghFetch(url, opts){
+    opts = opts || {};
+    var headers = Object.assign({'Accept':'application/vnd.github+json'}, opts.headers||{});
+    var token = getToken();
+    if(token) headers['Authorization'] = 'token ' + token;
+    return fetch(url, Object.assign({}, opts, {headers: headers})).then(function(res){
+      return res.text().then(function(text){
+        var body = {}; try{ body = text ? JSON.parse(text) : {}; }catch(e){}
+        return {ok: res.ok, status: res.status, body: body};
+      });
+    });
+  }
+  function verifyToken(token){
+    return fetch('https://api.github.com/user', {headers:{'Authorization':'token '+token, 'Accept':'application/vnd.github+json'}})
+      .then(function(res){ return res.ok ? res.json() : Promise.reject(res.status); });
+  }
+
+  // ---------------- Nav / breadcrumb / shell ----------------
   function renderNav(){
     var list = document.getElementById('categoryList');
     list.innerHTML = '';
@@ -58,9 +95,7 @@
       var p = DATA.pages.find(function(x){return x.id===state.view.id;});
       if(p){ a.href = DATA.editBase + p.path; a.style.display=''; a.lastChild.textContent = ' Edit on GitHub'; return; }
     }
-    a.href = DATA.newPageBase ? DATA.newPageBase + 'content/pages/' : DATA.editBase;
-    a.style.display = '';
-    a.lastChild.textContent = ' Add a page on GitHub';
+    a.style.display = 'none';
   }
   function setView(v){ state.view=v; window.scrollTo(0,0); render(); }
   function closeSidebarMobile(){ document.getElementById('sidebar').classList.remove('open'); document.getElementById('scrim').classList.remove('show'); }
@@ -78,7 +113,7 @@
   function renderHome(){
     var wrap = document.createDocumentFragment();
     var hero = el('div', {'class':'hero'});
-    hero.innerHTML = '<h2>IT process documentation, kept current by the whole team.</h2><p>Every runbook, checklist and setup guide your team relies on — searchable in one place, editable straight from GitHub.</p>';
+    hero.innerHTML = '<h2>IT process documentation, kept current by the whole team.</h2><p>Every runbook, checklist and setup guide your team relies on — searchable in one place, editable right here.</p>';
     wrap.appendChild(hero);
     var stats = [
       {n:DATA.pages.length, l:'Pages'},
@@ -170,9 +205,284 @@
     return wrap;
   }
 
+  // ---------------- Modals ----------------
+  function closeModal(){ document.getElementById('modalRoot').innerHTML = ''; }
+
+  function openTokenModal(onSuccess){
+    var root = document.getElementById('modalRoot');
+    var backdrop = el('div', {'class':'modal-backdrop'});
+    var modal = el('div', {'class':'modal'});
+    var settingsUrl = repoConfigured()
+      ? 'https://github.com/settings/personal-access-tokens/new?name=Runbook%20editing&contents=write&repositories='+encodeURIComponent(DATA.repo.name)
+      : 'https://github.com/settings/personal-access-tokens/new';
+    modal.innerHTML =
+      '<div class="modal-head"><h3>Connect GitHub to edit</h3><button class="modal-close">&times;</button></div>'+
+      '<div class="modal-body">'+
+        '<div class="token-box">'+
+          'Editing writes directly to this repo through GitHub’s API, so it needs your own GitHub access token — kept only in this browser, never sent anywhere but github.com.'+
+          '<ol>'+
+            '<li>Open <a href="'+settingsUrl+'" target="_blank" rel="noopener">Create a fine-grained token</a> (opens GitHub).</li>'+
+            '<li>Under <b>Repository access</b>, choose <b>Only select repositories</b> and pick just this repo'+(repoConfigured()?' (<code>'+escapeHtml(DATA.repo.name)+'</code>)':'')+'.</li>'+
+            '<li>Under <b>Permissions → Repository permissions</b>, set <b>Contents</b> to <b>Read and write</b>.</li>'+
+            '<li>Click <b>Generate token</b>, copy it, and paste it below.</li>'+
+          '</ol>'+
+        '</div>'+
+        '<div class="field"><label>Personal access token</label><input type="text" id="tokenInput" placeholder="github_pat_..." autocomplete="off" spellcheck="false"></div>'+
+        '<div class="form-error" id="tokenErr" style="display:none;"></div>'+
+      '</div>'+
+      '<div class="modal-foot"><button class="btn-ghost" id="tokenCancel">Cancel</button><button class="btn-primary" id="tokenSave">Connect</button></div>';
+    backdrop.appendChild(modal); root.innerHTML=''; root.appendChild(backdrop);
+    backdrop.addEventListener('click', function(e){ if(e.target===backdrop) closeModal(); });
+    modal.querySelector('.modal-close').addEventListener('click', closeModal);
+    modal.querySelector('#tokenCancel').addEventListener('click', closeModal);
+    modal.querySelector('#tokenInput').focus();
+    modal.querySelector('#tokenSave').addEventListener('click', function(){
+      var val = modal.querySelector('#tokenInput').value.trim();
+      var errBox = modal.querySelector('#tokenErr');
+      var btn = modal.querySelector('#tokenSave');
+      if(!val){ errBox.textContent='Paste a token first.'; errBox.style.display='block'; return; }
+      btn.innerHTML = '<span class="spinner"></span> Checking…'; btn.disabled = true;
+      verifyToken(val).then(function(user){
+        setToken(val);
+        refreshAccountPanel();
+        closeModal();
+        showToast('Connected as '+(user.login||'GitHub user'));
+        if(onSuccess) onSuccess();
+      }).catch(function(){
+        errBox.textContent = 'That token didn’t work — double check it was created with Contents: Read and write access to this repo.';
+        errBox.style.display = 'block';
+        btn.textContent = 'Connect'; btn.disabled = false;
+      });
+    });
+  }
+
+  function ensureConnected(cb){
+    var token = getToken();
+    if(token){ cb(); return; }
+    openTokenModal(cb);
+  }
+
+  var pendingPageDraft = null;
+
+  function openCategoryModal(fromPageModal){
+    var root = document.getElementById('modalRoot');
+    var selIcon = 'book';
+    var backdrop = el('div', {'class':'modal-backdrop'});
+    var modal = el('div', {'class':'modal'});
+    modal.innerHTML =
+      '<div class="modal-head"><h3>New category</h3><button class="modal-close">&times;</button></div>'+
+      '<div class="modal-body">'+
+        '<div class="field"><label>Name</label><input type="text" id="catName" placeholder="e.g. Security &amp; Compliance"></div>'+
+        '<div class="field"><label>Description</label><textarea id="catDesc" style="min-height:70px;" placeholder="What kind of docs live here?"></textarea></div>'+
+        '<div class="field"><label>Icon</label><div class="icon-picker" id="iconPicker"></div></div>'+
+        '<div class="form-error" id="catErr" style="display:none;"></div>'+
+      '</div>'+
+      '<div class="modal-foot"><button class="btn-ghost" id="catCancel">Cancel</button><button class="btn-primary" id="catSave">Create category</button></div>';
+    backdrop.appendChild(modal); root.innerHTML=''; root.appendChild(backdrop);
+    var picker = modal.querySelector('#iconPicker');
+    ICON_KEYS.forEach(function(k){
+      var opt = el('button', {'class':'icon-opt'+(k===selIcon?' sel':''), type:'button'});
+      opt.innerHTML = svgIcon(k);
+      opt.addEventListener('click', function(){ picker.querySelectorAll('.icon-opt').forEach(function(o){o.classList.remove('sel');}); opt.classList.add('sel'); selIcon=k; });
+      picker.appendChild(opt);
+    });
+    backdrop.addEventListener('click', function(e){ if(e.target===backdrop) closeModal(); });
+    modal.querySelector('.modal-close').addEventListener('click', function(){ closeModal(); if(fromPageModal && pendingPageDraft){ openPageModal(null, pendingPageDraft); } });
+    modal.querySelector('#catCancel').addEventListener('click', function(){ closeModal(); if(fromPageModal && pendingPageDraft){ openPageModal(null, pendingPageDraft); } });
+    modal.querySelector('#catSave').addEventListener('click', function(){
+      var name = modal.querySelector('#catName').value.trim();
+      var desc = modal.querySelector('#catDesc').value.trim();
+      var errBox = modal.querySelector('#catErr');
+      if(!name){ errBox.textContent='Give the category a name.'; errBox.style.display='block'; return; }
+      var id = slugify(name);
+      if(catById(id)){ errBox.textContent='A category with a similar name already exists.'; errBox.style.display='block'; return; }
+      var btn = modal.querySelector('#catSave');
+      btn.innerHTML = '<span class="spinner"></span> Creating…'; btn.disabled = true;
+      createCategory({id:id, name:name, description:desc, icon:selIcon}).then(function(){
+        showToast('Category created — publishing now…');
+        closeModal();
+        if(fromPageModal && pendingPageDraft){
+          pendingPageDraft.categoryId = id;
+          openPageModal(null, pendingPageDraft);
+        }
+        pollForRebuild();
+      }).catch(function(err){
+        errBox.textContent = err && err.message ? err.message : 'Couldn’t create the category — check your token has write access.';
+        errBox.style.display = 'block';
+        btn.textContent = 'Create category'; btn.disabled = false;
+      });
+    });
+  }
+
+  function createCategory(cat){
+    var path = 'content/categories.yml';
+    var url = apiBase()+'/contents/'+path;
+    return ghFetch(url+'?ref='+DATA.repo.branch, {method:'GET'}).then(function(res){
+      if(!res.ok) return Promise.reject(new Error('Could not read categories.yml (status '+res.status+').'));
+      var current = b64DecodeUtf8(res.body.content);
+      var maxOrder = DATA.categories.reduce(function(m,c){ return Math.max(m, c.order||0); }, -1);
+      var block = '\n- id: '+cat.id+'\n  name: '+yamlStr(cat.name)+'\n  description: '+yamlStr(cat.description)+'\n  icon: '+cat.icon+'\n  order: '+(maxOrder+1)+'\n';
+      var updated = current.replace(/\s*$/, '') + '\n' + block;
+      return ghFetch(url, {
+        method:'PUT',
+        body: JSON.stringify({
+          message: 'Add category: '+cat.name,
+          content: b64EncodeUtf8(updated),
+          sha: res.body.sha,
+          branch: DATA.repo.branch
+        })
+      });
+    }).then(function(res){
+      if(!res || !res.ok) return Promise.reject(new Error(res && res.body && res.body.message));
+      DATA.categories.push({id:cat.id, name:cat.name, description:cat.description, icon:cat.icon, order: DATA.categories.length});
+      renderNav();
+      return res;
+    });
+  }
+
+  function openPageModal(existingUnused, draft){
+    if(!DATA.categories.length){ showToast('Create a category first.'); return; }
+    var root = document.getElementById('modalRoot');
+    draft = draft || {};
+    var defaultCat = draft.categoryId || (state.view.type==='category' ? state.view.id : DATA.categories[0].id);
+    var backdrop = el('div', {'class':'modal-backdrop'});
+    var modal = el('div', {'class':'modal'});
+    var catOptions = DATA.categories.map(function(c){
+      return '<option value="'+c.id+'"'+(c.id===defaultCat?' selected':'')+'>'+escapeHtml(c.name)+'</option>';
+    }).join('');
+    modal.innerHTML =
+      '<div class="modal-head"><h3>New page</h3><button class="modal-close">&times;</button></div>'+
+      '<div class="modal-body">'+
+        '<div class="field-row">'+
+          '<div class="field" style="flex:2;"><label>Title</label><input type="text" id="pgTitle" value="'+(draft.title?escapeHtml(draft.title):'')+'" placeholder="e.g. Resetting a locked account"></div>'+
+          '<div class="field"><label>Category</label><select id="pgCat">'+catOptions+'</select></div>'+
+        '</div>'+
+        '<button type="button" class="btn-ghost" id="pgNewCat" style="align-self:flex-start; padding:2px 0; font-size:12.5px;">+ New category</button>'+
+        '<div class="field"><label>Summary <span class="hint" style="display:inline;">(shown in lists)</span></label><input type="text" id="pgSummary" value="'+(draft.summary?escapeHtml(draft.summary):'')+'" placeholder="One line describing this doc"></div>'+
+        '<div class="field"><label>Tags</label><input type="text" id="pgTags" value="'+(draft.tags?escapeHtml(draft.tags):'')+'" placeholder="comma, separated, tags"></div>'+
+        '<div class="field"><label>Content</label><textarea id="pgContent" placeholder="## Steps&#10;- First do this&#10;- Then this&#10;&#10;Standard Markdown — headings, lists, `code`, ```code blocks```, **bold**, [links](https://...).">'+(draft.content?escapeHtml(draft.content):'')+'</textarea>'+
+          '<div class="hint">Standard Markdown: <code>## heading</code>, <code>- bullet</code>, <code>\`code\`</code>, fenced <code>\`\`\`</code> blocks, <code>**bold**</code>, links.</div></div>'+
+        '<div class="form-error" id="pgErr" style="display:none;"></div>'+
+      '</div>'+
+      '<div class="modal-foot"><button class="btn-ghost" id="pgCancel">Cancel</button><button class="btn-primary" id="pgSave">Publish page</button></div>';
+    backdrop.appendChild(modal); root.innerHTML=''; root.appendChild(backdrop);
+    backdrop.addEventListener('click', function(e){ if(e.target===backdrop) closeModal(); });
+    modal.querySelector('.modal-close').addEventListener('click', closeModal);
+    modal.querySelector('#pgCancel').addEventListener('click', closeModal);
+    modal.querySelector('#pgNewCat').addEventListener('click', function(){
+      pendingPageDraft = readPageDraft(modal);
+      openCategoryModal(true);
+    });
+    modal.querySelector('#pgSave').addEventListener('click', function(){
+      var d = readPageDraft(modal);
+      var errBox = modal.querySelector('#pgErr');
+      if(!d.title){ errBox.textContent='Give the page a title.'; errBox.style.display='block'; return; }
+      var btn = modal.querySelector('#pgSave');
+      btn.innerHTML = '<span class="spinner"></span> Publishing…'; btn.disabled = true;
+      createPage(d).then(function(){
+        showToast('Page published — the site is rebuilding…');
+        closeModal();
+        pollForRebuild();
+      }).catch(function(err){
+        errBox.textContent = err && err.message ? err.message : 'Couldn’t publish — check your token has write access to this repo.';
+        errBox.style.display = 'block';
+        btn.textContent = 'Publish page'; btn.disabled = false;
+      });
+    });
+  }
+
+  function readPageDraft(modal){
+    return {
+      title: modal.querySelector('#pgTitle').value.trim(),
+      categoryId: modal.querySelector('#pgCat').value,
+      summary: modal.querySelector('#pgSummary').value.trim(),
+      tags: modal.querySelector('#pgTags').value.trim(),
+      content: modal.querySelector('#pgContent').value
+    };
+  }
+
+  function createPage(d){
+    var tags = d.tags.split(',').map(function(t){return t.trim();}).filter(Boolean).slice(0,8);
+    var baseSlug = slugify(d.title);
+    var existingPaths = DATA.pages.map(function(p){return p.path;});
+    var slug = baseSlug, n = 2;
+    while(existingPaths.indexOf('content/pages/'+d.categoryId+'/'+slug+'.md') > -1){ slug = baseSlug+'-'+n; n++; }
+    var path = 'content/pages/'+d.categoryId+'/'+slug+'.md';
+    var tagsYaml = '['+tags.map(yamlStr).join(', ')+']';
+    var fileText = '---\ntitle: '+yamlStr(d.title)+'\ncategory: '+d.categoryId+'\nsummary: '+yamlStr(d.summary)+'\ntags: '+tagsYaml+'\n---\n'+d.content.replace(/\r\n/g,'\n')+'\n';
+    return ghFetch(apiBase()+'/contents/'+path, {
+      method:'PUT',
+      body: JSON.stringify({
+        message: 'Add page: '+d.title,
+        content: b64EncodeUtf8(fileText),
+        branch: DATA.repo.branch
+      })
+    }).then(function(res){
+      if(!res.ok) return Promise.reject(new Error(res.body && res.body.message));
+      return res;
+    });
+  }
+
+  // ---------------- Rebuild polling ----------------
+  var pollTimer = null;
+  function pollForRebuild(){
+    if(!repoConfigured()) return;
+    clearTimeout(pollTimer);
+    var startedAt = Date.now();
+    var tries = 0;
+    (function tick(){
+      tries++;
+      fetch('https://api.github.com/repos/'+DATA.repo.owner+'/'+DATA.repo.name+'/actions/runs?per_page=1', {headers:{'Accept':'application/vnd.github+json'}})
+        .then(function(res){ return res.ok ? res.json() : null; })
+        .then(function(json){
+          var run = json && json.workflow_runs && json.workflow_runs[0];
+          var runIsFresh = run && (new Date(run.created_at).getTime() > startedAt - 30000);
+          if(run && runIsFresh && run.status === 'completed'){
+            showToast(run.conclusion === 'success' ? 'Published! Refreshing…' : 'Build finished with issues — refreshing to check.');
+            setTimeout(function(){ location.reload(); }, 1200);
+            return;
+          }
+          if(tries < 20){ pollTimer = setTimeout(tick, 6000); }
+          else { showToast('Still publishing — refresh in a minute to see it live.', 5000); }
+        })
+        .catch(function(){ if(tries < 20){ pollTimer = setTimeout(tick, 6000); } });
+    })();
+  }
+
+  // ---------------- Account panel ----------------
+  function refreshAccountPanel(){
+    var box = document.getElementById('accountPanel');
+    if(!box) return;
+    var token = getToken();
+    if(!token){
+      box.innerHTML = '<button class="btn-ghost" id="connectBtn" style="padding:0; font-size:11.5px; font-weight:700; color:var(--accent);">Connect GitHub to edit →</button>';
+      var b = box.querySelector('#connectBtn');
+      if(b) b.addEventListener('click', function(){ openTokenModal(); });
+      return;
+    }
+    box.innerHTML = '<span class="mono">Checking connection…</span>';
+    verifyToken(token).then(function(user){
+      box.innerHTML = '<div class="gh-account"><span>Connected as <b>'+escapeHtml(user.login||'')+'</b></span><button id="disconnectBtn">Disconnect</button></div>';
+      box.querySelector('#disconnectBtn').addEventListener('click', function(){ clearToken(); refreshAccountPanel(); showToast('Disconnected.'); });
+    }).catch(function(){
+      clearToken();
+      box.innerHTML = '<button class="btn-ghost" id="connectBtn" style="padding:0; font-size:11.5px; font-weight:700; color:var(--accent);">Connect GitHub to edit →</button>';
+      box.querySelector('#connectBtn').addEventListener('click', function(){ openTokenModal(); });
+    });
+  }
+
+  // ---------------- Wire up static UI ----------------
   document.querySelectorAll('.nav-item[data-view="home"]').forEach(function(b){ b.addEventListener('click', function(){ setView({type:'home'}); closeSidebarMobile(); }); });
   document.getElementById('menuBtn').addEventListener('click', function(){ document.getElementById('sidebar').classList.add('open'); document.getElementById('scrim').classList.add('show'); });
   document.getElementById('scrim').addEventListener('click', closeSidebarMobile);
+  document.getElementById('newPageBtn').addEventListener('click', function(){
+    if(!repoConfigured()){ showToast('This copy of the site isn’t linked to a repo yet.'); return; }
+    ensureConnected(function(){ openPageModal(); });
+  });
+  document.getElementById('addCategoryBtn').addEventListener('click', function(){
+    if(!repoConfigured()){ showToast('This copy of the site isn’t linked to a repo yet.'); return; }
+    ensureConnected(function(){ openCategoryModal(false); });
+  });
   var searchTimer=null;
   document.getElementById('searchInput').addEventListener('input', function(e){
     var v = e.target.value; clearTimeout(searchTimer);
@@ -180,7 +490,12 @@
   });
 
   var gen = new Date(DATA.generatedAt);
-  document.getElementById('sidebarFooter').innerHTML = 'Published '+gen.toLocaleDateString(undefined,{month:'short',day:'numeric',year:'numeric'})+'<br>Built from <a href="'+(DATA.editBase ? DATA.editBase.replace(/\/edit\/[^/]+\/$/,'') : '#')+'" target="_blank" rel="noopener">this repo</a>';
+  var repoLink = repoConfigured() ? 'https://github.com/'+DATA.repo.owner+'/'+DATA.repo.name : '#';
+  document.getElementById('sidebarFooter').innerHTML =
+    '<div id="accountPanel" style="margin-bottom:10px;"></div>'+
+    'Published '+gen.toLocaleDateString(undefined,{month:'short',day:'numeric',year:'numeric'})+'<br>'+
+    '<a href="'+repoLink+'" target="_blank" rel="noopener">View repo on GitHub</a>';
+  refreshAccountPanel();
 
   render();
 })();

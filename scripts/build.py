@@ -42,10 +42,11 @@ def git_dates(path):
     return now, now
 
 
-def detect_repo_edit_base():
-    """Best-effort https://github.com/<owner>/<repo>/edit/<branch>/ base URL,
-    derived from the git remote and current branch. Falls back to '' (the
-    Edit-on-GitHub link is simply hidden) if this isn't a git checkout yet."""
+def detect_repo():
+    """Best-effort {owner, name, branch} for this checkout, derived from the
+    git remote and current branch. Falls back to empty strings (client-side
+    GitHub-API editing and the Edit-on-GitHub link are simply hidden) if this
+    isn't a git checkout yet."""
     try:
         remote = subprocess.run(
             ["git", "config", "--get", "remote.origin.url"],
@@ -62,10 +63,11 @@ def detect_repo_edit_base():
         elif "github.com/" in remote:
             owner_repo = remote.split("github.com/", 1)[1]
         else:
-            return ""
-        return f"https://github.com/{owner_repo}/edit/{branch}/"
+            return {"owner": "", "name": "", "branch": branch}
+        owner, _, name = owner_repo.partition("/")
+        return {"owner": owner, "name": name, "branch": branch}
     except Exception:
-        return ""
+        return {"owner": "", "name": "", "branch": "main"}
 
 
 def parse_front_matter(text):
@@ -148,12 +150,18 @@ PAGE_TEMPLATE = """<!doctype html>
 def main():
     categories = load_categories()
     pages = load_pages()
+    repo = detect_repo()
+    edit_base = (
+        f"https://github.com/{repo['owner']}/{repo['name']}/edit/{repo['branch']}/"
+        if repo["owner"] else ""
+    )
     data = {
         "generatedAt": datetime.datetime.utcnow().strftime("%Y-%m-%dT%H:%M:%SZ"),
         "categories": categories,
         "pages": pages,
-        "editBase": detect_repo_edit_base(),
-        "newPageBase": detect_repo_edit_base().replace("/edit/", "/new/"),
+        "repo": repo,
+        "editBase": edit_base,
+        "newPageBase": edit_base.replace("/edit/", "/new/"),
     }
     data_json = json.dumps(data).replace("</", "<\\/")
     js = JS_TEMPLATE.replace("__DATA_JSON__", data_json)
