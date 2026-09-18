@@ -1,0 +1,35 @@
+<div class="shell">
+  <div class="scrim" id="scrim"></div>
+  <aside class="sidebar" id="sidebar">
+    <div class="brand">
+      <div class="brand-mark"><svg viewBox="0 0 24 24" fill="none" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M5 4h11a2 2 0 0 1 2 2v13a1 1 0 0 1-1.5.87L12 17l-4.5 2.87A1 1 0 0 1 6 19V6a2 2 0 0 1 2-2Z"/></svg></div>
+      <div class="brand-text"><h1>Runbook</h1><p>IT process documentation</p></div>
+    </div>
+    <div class="search-wrap">
+      <svg viewBox="0 0 24 24" fill="none" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><circle cx="11" cy="11" r="7"/><path d="m21 21-4.3-4.3"/></svg>
+      <input id="searchInput" type="text" placeholder="Search docs, commands, tags…" autocomplete="off">
+    </div>
+    <div class="nav">
+      <button class="nav-item" data-view="home">
+        <svg viewBox="0 0 24 24" fill="none" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M3 11.5 12 4l9 7.5"/><path d="M5 10v9a1 1 0 0 0 1 1h4v-6h4v6h4a1 1 0 0 0 1-1v-9"/></svg>
+        Overview
+      </button>
+      <div class="nav-section-label">Categories</div>
+      <div id="categoryList"></div>
+    </div>
+    <div class="sidebar-footer" id="sidebarFooter"></div>
+  </aside>
+  <main class="main">
+    <header class="topbar">
+      <div id="breadcrumb" style="display:flex; align-items:center;">
+        <button id="menuBtn" aria-label="Toggle menu"><svg viewBox="0 0 24 24" fill="none" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M4 6h16M4 12h16M4 18h16"/></svg></button>
+        <span id="breadcrumbText"><b>Overview</b></span>
+      </div>
+      <a class="pill" id="editLink" href="#" target="_blank" rel="noopener">
+        <svg viewBox="0 0 24 24" fill="none" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M12 20h9"/><path d="M16.5 3.5a2.1 2.1 0 0 1 3 3L7 19l-4 1 1-4Z"/></svg>
+        Edit on GitHub
+      </a>
+    </header>
+    <div id="content"></div>
+  </main>
+</div>

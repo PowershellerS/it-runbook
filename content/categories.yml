@@ -1,0 +1,29 @@
+# Categories for the Runbook site.
+# Add a new category by adding an entry here, then create a folder
+# under content/pages/<id>/ for its pages.
+#
+# icon options: book, wrench, users, server, shield, cloud, database, lock, alert, network
+
+- id: getting-started
+  name: Getting Started
+  description: How this Runbook works, and the conventions we use when writing docs.
+  icon: book
+  order: 0
+
+- id: it-ops
+  name: IT Operations & Troubleshooting
+  description: Incident response, common fixes, and escalation paths for day-to-day issues.
+  icon: wrench
+  order: 1
+
+- id: onboarding
+  name: Onboarding & Access
+  description: New hire setup, account provisioning, and offboarding procedures.
+  icon: users
+  order: 2
+
+- id: systems
+  name: Systems & Infrastructure
+  description: Server inventories, architecture notes, and configuration standards.
+  icon: server
+  order: 3
