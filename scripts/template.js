@@ -48,6 +48,47 @@ function slugify(s) {
 function b64EncodeUtf8(str) { return btoa(unescape(encodeURIComponent(str))); }
 function b64DecodeUtf8(str) { return decodeURIComponent(escape(atob(String(str).replace(/\n/g, "")))); }
 function yamlStr(s) { return '"' + String(s == null ? "" : s).replace(/\\/g, "\\\\").replace(/"/g, '\\"') + '"'; }
+function unquote(s) {
+  s = String(s == null ? "" : s).trim();
+  if ((s[0] === '"' && s[s.length - 1] === '"') || (s[0] === "'" && s[s.length - 1] === "'")) {
+    s = s.slice(1, -1);
+  }
+  return s.replace(/\\"/g, '"').replace(/\\\\/g, "\\");
+}
+/* Best-effort parser for the simple front matter this site writes (and tolerant of
+   small hand-edits made via GitHub's own web editor): "key: value", "key: [a, b]",
+   and "key:" followed by "  - item" block lists. */
+function parseFrontMatter(raw) {
+  raw = String(raw || "").replace(/^﻿/, "");
+  if (raw.slice(0, 3) !== "---") return { fm: {}, body: raw };
+  var end = raw.indexOf("\n---", 3);
+  if (end === -1) return { fm: {}, body: raw };
+  var fmBlock = raw.slice(3, end).replace(/^\n/, "");
+  var rest = raw.slice(end + 4);
+  var body = rest.replace(/^\r?\n/, "");
+  var fm = {};
+  var lines = fmBlock.split("\n");
+  for (var i = 0; i < lines.length; i++) {
+    var line = lines[i];
+    var m = line.match(/^([A-Za-z0-9_]+):\s*(.*)$/);
+    if (!m) continue;
+    var key = m[1], val = m[2].trim();
+    if (val === "") {
+      var items = [];
+      while (i + 1 < lines.length && /^\s*-\s*/.test(lines[i + 1])) {
+        i++;
+        items.push(unquote(lines[i].replace(/^\s*-\s*/, "").trim()));
+      }
+      fm[key] = items;
+    } else if (val[0] === "[" && val[val.length - 1] === "]") {
+      var inner = val.slice(1, -1).trim();
+      fm[key] = inner ? inner.split(",").map(function (s) { return unquote(s.trim()); }) : [];
+    } else {
+      fm[key] = unquote(val);
+    }
+  }
+  return { fm: fm, body: body };
+}
 function findCategory(id) { return DATA.categories.filter(function (c) { return c.id === id; })[0]; }
 function findPage(id) { return DATA.pages.filter(function (p) { return p.id === id; })[0]; }
 function pagesInCategory(catId) { return DATA.pages.filter(function (p) { return p.categoryId === catId; }); }
@@ -154,7 +195,7 @@ function openTokenModal(onSuccess) {
   if (repoConfigured()) {
     url = "https://github.com/settings/personal-access-tokens/new?name=" +
       encodeURIComponent("Runbook editing (" + DATA.repo.name + ")") +
-      "&description=" + encodeURIComponent("Lets the Runbook site create and delete docs in this repo.") +
+      "&description=" + encodeURIComponent("Lets the Runbook site create, edit, and delete docs in this repo.") +
       "&target_name=" + encodeURIComponent(DATA.repo.owner) +
       "&repositories[]=" + encodeURIComponent(DATA.repo.name) +
       "&contents=write";
@@ -311,6 +352,7 @@ function createCategory(cat) {
 function openPageModal(draft) {
   draft = draft || {};
   pendingPageDraft = draft;
+  var editingPage = draft.__editingPage || null;
   if (!DATA.categories.length) {
     toast("Create a category first.", true);
     openCategoryModal(true);
@@ -320,7 +362,7 @@ function openPageModal(draft) {
   var selectedCat = draft.categoryId || cats[0].id;
   openModal(
     '<div class="modal">' +
-      '<div class="modal-head"><h3>New page</h3><button type="button" id="pgX">' + iconSvg("x") + "</button></div>" +
+      '<div class="modal-head"><h3>' + (editingPage ? "Edit page" : "New page") + '</h3><button type="button" id="pgX">' + iconSvg("x") + "</button></div>" +
       '<div class="modal-body">' +
         '<div class="field-row">' +
           '<div class="field"><label>Title</label><input type="text" id="pgTitle" placeholder="e.g. Resetting a locked account" value="' + esc(draft.title || "") + '"></div>' +
@@ -334,32 +376,37 @@ function openPageModal(draft) {
         "</div>" +
         '<div class="form-error" id="pgErr"></div>' +
       "</div>" +
-      '<div class="modal-foot"><button class="btn-secondary" type="button" id="pgCancel">Cancel</button><button class="btn-primary" type="button" id="pgSave">Publish page</button></div>' +
+      '<div class="modal-foot"><button class="btn-secondary" type="button" id="pgCancel">Cancel</button><button class="btn-primary" type="button" id="pgSave">' + (editingPage ? "Save changes" : "Publish page") + "</button></div>" +
     "</div>"
   );
   var sel = document.getElementById("pgCat");
   sel.innerHTML = cats.map(function (c) { return '<option value="' + c.id + '"' + (c.id === selectedCat ? " selected" : "") + ">" + esc(c.name) + "</option>"; }).join("");
   document.getElementById("pgX").onclick = function () { pendingPageDraft = null; closeModal(); };
   document.getElementById("pgCancel").onclick = document.getElementById("pgX").onclick;
-  document.getElementById("pgNewCat").onclick = function () { pendingPageDraft = readPageDraft(); openCategoryModal(true); };
+  document.getElementById("pgNewCat").onclick = function () {
+    pendingPageDraft = readPageDraft();
+    pendingPageDraft.__editingPage = editingPage;
+    openCategoryModal(true);
+  };
   document.getElementById("pgSave").onclick = function () {
     var d = readPageDraft();
     var errEl = document.getElementById("pgErr");
     errEl.className = "form-error";
     if (!d.title) { errEl.textContent = "Give the page a title."; errEl.className = "form-error show"; return; }
     var btn = document.getElementById("pgSave");
-    btn.disabled = true; btn.innerHTML = '<span class="spinner"></span> Publishing…';
+    btn.disabled = true; btn.innerHTML = '<span class="spinner"></span> ' + (editingPage ? "Saving…" : "Publishing…");
     ensureConnected(function () {
-      createPage(d).then(function (page) {
+      var action = editingPage ? updatePage(d, editingPage) : createPage(d);
+      action.then(function (page) {
         pendingPageDraft = null;
         closeModal();
-        toast("Page published — rebuilding site…");
+        toast(editingPage ? "Page updated — rebuilding site…" : "Page published — rebuilding site…");
         pollForRebuild();
-        navigateTo("#/category/" + page.categoryId);
+        navigateTo(editingPage ? "#/page/" + page.id : "#/category/" + page.categoryId);
       }).catch(function (err) {
         errEl.textContent = err.message || "Something went wrong.";
         errEl.className = "form-error show";
-        btn.disabled = false; btn.textContent = "Publish page";
+        btn.disabled = false; btn.textContent = editingPage ? "Save changes" : "Publish page";
       });
     });
   };
@@ -373,18 +420,27 @@ function readPageDraft() {
     content: document.getElementById("pgContent").value
   };
 }
-function createPage(d) {
-  var baseSlug = slugify(d.title);
-  var existingPaths = DATA.pages.map(function (p) { return p.path; });
-  var slug = baseSlug, n = 2;
-  while (existingPaths.indexOf("content/pages/" + d.categoryId + "/" + slug + ".md") !== -1) {
-    slug = baseSlug + "-" + n; n++;
-  }
-  var tagsArr = d.tags ? d.tags.split(",").map(function (t) { return t.trim(); }).filter(Boolean) : [];
+function tagsFromInput(tags) {
+  return tags ? tags.split(",").map(function (t) { return t.trim(); }).filter(Boolean) : [];
+}
+function buildPageFileText(d, tagsArr) {
   var tagsYaml = "[" + tagsArr.map(yamlStr).join(", ") + "]";
   var front = "---\ntitle: " + yamlStr(d.title) + "\ncategory: " + d.categoryId +
     "\nsummary: " + yamlStr(d.summary) + "\ntags: " + tagsYaml + "\n---\n";
-  var fileText = front + (d.content || "").replace(/\r\n/g, "\n");
+  return front + (d.content || "").replace(/\r\n/g, "\n");
+}
+function uniqueSlug(baseSlug, categoryId, excludePath) {
+  var existingPaths = DATA.pages.map(function (p) { return p.path; }).filter(function (p) { return p !== excludePath; });
+  var slug = baseSlug, n = 2;
+  while (existingPaths.indexOf("content/pages/" + categoryId + "/" + slug + ".md") !== -1) {
+    slug = baseSlug + "-" + n; n++;
+  }
+  return slug;
+}
+function createPage(d) {
+  var slug = uniqueSlug(slugify(d.title), d.categoryId, null);
+  var tagsArr = tagsFromInput(d.tags);
+  var fileText = buildPageFileText(d, tagsArr);
   var path = "content/pages/" + d.categoryId + "/" + slug + ".md";
   return putFile(path, fileText, "Add page: " + d.title).then(function () {
     var now = new Date().toISOString();
@@ -393,6 +449,65 @@ function createPage(d) {
       tags: tagsArr, contentHtml: "<p>" + esc(d.content || "").replace(/\n/g, "<br>") + "</p>",
       createdAt: now, updatedAt: now, path: path
     };
+    DATA.pages.push(page);
+    return page;
+  });
+}
+
+/* ================= Page editing ================= */
+function openEditPageModal(page) {
+  ensureConnected(function () {
+    openModal(
+      '<div class="modal modal-sm"><div class="modal-body" style="align-items:center; text-align:center; padding:40px 22px;">' +
+      '<span class="spinner dark"></span><p style="margin-top:10px; color:var(--ink-soft); font-size:13.5px;">Loading page…</p></div></div>'
+    );
+    getFile(page.path).then(function (f) {
+      var parsed = parseFrontMatter(f.content);
+      var draft = {
+        title: parsed.fm.title || page.title,
+        categoryId: findCategory(parsed.fm.category) ? parsed.fm.category : page.categoryId,
+        summary: parsed.fm.summary != null ? parsed.fm.summary : (page.summary || ""),
+        tags: (parsed.fm.tags && parsed.fm.tags.length ? parsed.fm.tags : (page.tags || [])).join(", "),
+        content: parsed.body.replace(/\n+$/, ""),
+        __editingPage: page
+      };
+      openPageModal(draft);
+    }).catch(function (err) {
+      closeModal();
+      toast(err.message || "Could not load that page.", true);
+    });
+  });
+}
+function updatePage(d, originalPage) {
+  var originalSlug = originalPage.path.split("/").pop().replace(/\.md$/, "");
+  var newPath = "content/pages/" + d.categoryId + "/" + originalSlug + ".md";
+  if (newPath !== originalPage.path) {
+    // moving to a different category — avoid clashing with a page already there
+    var slug = uniqueSlug(originalSlug, d.categoryId, originalPage.path);
+    newPath = "content/pages/" + d.categoryId + "/" + slug + ".md";
+  }
+  var tagsArr = tagsFromInput(d.tags);
+  var fileText = buildPageFileText(d, tagsArr);
+  var isMove = newPath !== originalPage.path;
+
+  var writeNew = isMove
+    ? putFile(newPath, fileText, "Update page: " + d.title)
+    : getFile(originalPage.path).then(function (f) { return putFile(newPath, fileText, "Update page: " + d.title, f.sha); });
+
+  return writeNew.then(function () {
+    if (!isMove) return Promise.resolve();
+    return getFile(originalPage.path).then(function (f) {
+      return deleteFile(originalPage.path, "Move page: " + d.title, f.sha);
+    });
+  }).then(function () {
+    var now = new Date().toISOString();
+    var newSlug = newPath.split("/").pop().replace(/\.md$/, "");
+    var page = {
+      id: d.categoryId + "-" + newSlug, categoryId: d.categoryId, title: d.title, summary: d.summary,
+      tags: tagsArr, contentHtml: "<p>" + esc(d.content || "").replace(/\n/g, "<br>") + "</p>",
+      createdAt: originalPage.createdAt, updatedAt: now, path: newPath
+    };
+    DATA.pages = DATA.pages.filter(function (p) { return p.id !== originalPage.id; });
     DATA.pages.push(page);
     return page;
   });
@@ -476,22 +591,35 @@ function pageCardHtml(p, cat) {
         (p.tags && p.tags.length ? '<span class="tag-list">' + p.tags.map(function (t) { return '<span class="tag">' + esc(t) + "</span>"; }).join("") + "</span>" : "") +
       "</div>" +
     "</div>" +
-    '<button type="button" class="icon-btn page-delete" data-page="' + p.id + '" title="Delete page">' + iconSvg("trash") + "</button>" +
+    '<div class="card-actions">' +
+      '<button type="button" class="icon-btn page-edit" data-page="' + p.id + '" title="Edit page">' + iconSvg("edit") + "</button>" +
+      '<button type="button" class="icon-btn danger page-delete" data-page="' + p.id + '" title="Delete page">' + iconSvg("trash") + "</button>" +
+    "</div>" +
   "</div>";
 }
 
 function wirePageCards(root) {
   Array.prototype.forEach.call(root.querySelectorAll(".page-card"), function (card) {
     card.addEventListener("click", function (e) {
-      if (e.target.closest(".page-delete")) return;
+      if (e.target.closest(".page-delete") || e.target.closest(".page-edit")) return;
       location.hash = "#/page/" + card.getAttribute("data-page");
     });
   });
+  wirePageCardActions(root);
+}
+function wirePageCardActions(root) {
   Array.prototype.forEach.call(root.querySelectorAll(".page-delete"), function (btn) {
     btn.addEventListener("click", function (e) {
       e.stopPropagation();
       var page = findPage(btn.getAttribute("data-page"));
       if (page) openDeleteModal(page);
+    });
+  });
+  Array.prototype.forEach.call(root.querySelectorAll(".page-edit"), function (btn) {
+    btn.addEventListener("click", function (e) {
+      e.stopPropagation();
+      var page = findPage(btn.getAttribute("data-page"));
+      if (page) openEditPageModal(page);
     });
   });
 }
@@ -519,7 +647,10 @@ function renderHome() {
         var cat = findCategory(p.categoryId);
         return '<div class="recent-item" data-page="' + p.id + '"><div class="dot"></div><div style="flex:1; min-width:0;">' +
           '<div class="recent-item-row"><h4>' + esc(p.title) + (cat ? '<span class="tag-chip">' + esc(cat.name) + "</span>" : "") + "</h4>" +
-          '<button type="button" class="icon-btn page-delete" data-page="' + p.id + '" title="Delete page">' + iconSvg("trash") + "</button></div>" +
+          '<div class="card-actions">' +
+            '<button type="button" class="icon-btn page-edit" data-page="' + p.id + '" title="Edit page">' + iconSvg("edit") + "</button>" +
+            '<button type="button" class="icon-btn danger page-delete" data-page="' + p.id + '" title="Delete page">' + iconSvg("trash") + "</button>" +
+          "</div></div>" +
           (p.summary ? "<p>" + esc(p.summary) + "</p>" : "") +
           '<div class="meta">Updated ' + fmtDate(p.updatedAt) + "</div>" +
         "</div></div>";
@@ -530,17 +661,11 @@ function renderHome() {
   });
   Array.prototype.forEach.call(content.querySelectorAll(".recent-item"), function (card) {
     card.addEventListener("click", function (e) {
-      if (e.target.closest(".page-delete")) return;
+      if (e.target.closest(".page-delete") || e.target.closest(".page-edit")) return;
       location.hash = "#/page/" + card.getAttribute("data-page");
     });
   });
-  Array.prototype.forEach.call(content.querySelectorAll(".page-delete"), function (btn) {
-    btn.addEventListener("click", function (e) {
-      e.stopPropagation();
-      var page = findPage(btn.getAttribute("data-page"));
-      if (page) openDeleteModal(page);
-    });
-  });
+  wirePageCardActions(content);
 }
 
 function renderCategoryView(catId) {
@@ -570,11 +695,15 @@ function renderPageView(pageId) {
       (cat ? '<div class="cat-chip">' + iconSvg(cat.icon) + " " + esc(cat.name) + "</div>" : "") +
       "<h1>" + esc(page.title) + "</h1>" +
       '<div class="meta-row"><div class="meta"><span>Created ' + fmtDate(page.createdAt) + "</span><span>Updated " + fmtDate(page.updatedAt) + "</span></div>" +
-        '<div class="actions"><button type="button" class="btn-danger btn-outline" id="pageDeleteBtn">' + iconSvg("trash") + " Delete page</button></div>" +
+        '<div class="actions">' +
+          '<button type="button" class="btn-secondary" id="pageEditBtn">' + iconSvg("edit") + " Edit page</button>" +
+          '<button type="button" class="btn-danger btn-outline" id="pageDeleteBtn">' + iconSvg("trash") + " Delete page</button>" +
+        "</div>" +
       "</div>" +
       (page.tags && page.tags.length ? '<div class="tag-list" style="margin-top:10px;">' + page.tags.map(function (t) { return '<span class="tag">' + esc(t) + "</span>"; }).join("") + "</div>" : "") +
     "</div>" +
     '<div class="doc-body">' + page.contentHtml + "</div>";
+  document.getElementById("pageEditBtn").onclick = function () { openEditPageModal(page); };
   document.getElementById("pageDeleteBtn").onclick = function () { openDeleteModal(page); };
 }
 

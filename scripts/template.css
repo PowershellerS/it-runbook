@@ -183,7 +183,9 @@ svg { width: 18px; height: 18px; flex: none; }
   flex: none;
 }
 .icon-btn svg { width: 16px; height: 16px; stroke: currentColor; }
-.icon-btn:hover { background: var(--danger-soft); color: var(--danger); border-color: var(--danger-soft); }
+.icon-btn:hover { background: var(--surface-2); color: var(--ink); border-color: var(--border); }
+.icon-btn.danger:hover { background: var(--danger-soft); color: var(--danger); border-color: var(--danger-soft); }
+.card-actions { display: flex; gap: 2px; flex: none; }
 
 /* ---------- Home view ---------- */
 .stat-row { display: grid; grid-template-columns: repeat(3, 1fr); gap: 14px; margin-bottom: 26px; }
