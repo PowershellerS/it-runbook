@@ -20,7 +20,8 @@ var ICON_PATHS = {
   trash: '<path d="M4 7h16"/><path d="M9 7V5a2 2 0 0 1 2-2h2a2 2 0 0 1 2 2v2"/><path d="M6 7l1 13a2 2 0 0 0 2 2h6a2 2 0 0 0 2-2l1-13"/><path d="M10 11v6M14 11v6"/>',
   home: '<path d="M3 11.5 12 4l9 7.5"/><path d="M5 10v9a1 1 0 0 0 1 1h4v-6h4v6h4a1 1 0 0 0 1-1v-9"/>',
   edit: '<path d="M12 20h9"/><path d="M16.5 3.5a2.1 2.1 0 0 1 3 3L7 19l-4 1 1-4Z"/>',
-  search: '<circle cx="11" cy="11" r="7"/><path d="m21 21-4.3-4.3"/>'
+  search: '<circle cx="11" cy="11" r="7"/><path d="m21 21-4.3-4.3"/>',
+  upload: '<path d="M12 15V4M8 8l4-4 4 4"/><path d="M4 15v3a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2v-3"/>'
 };
 var ICON_KEYS = ["book", "wrench", "users", "server", "shield", "cloud", "database", "lock", "alert", "network"];
 
@@ -178,6 +179,176 @@ function pollForRebuild() {
       if (tries >= 20) clearInterval(timer);
     }).catch(function () {});
   }, 6000);
+}
+
+/* ================= Import existing documents ================= */
+var PDFJS_VERSION = "6.4.299";
+var MAMMOTH_VERSION = "1.13.0";
+var _scriptPromises = {};
+function loadScriptTag(src) {
+  if (_scriptPromises[src]) return _scriptPromises[src];
+  _scriptPromises[src] = new Promise(function (resolve, reject) {
+    var s = document.createElement("script");
+    s.src = src; s.async = true;
+    s.onload = function () { resolve(); };
+    s.onerror = function () { reject(new Error("Could not load a required library — check your internet connection and try again.")); };
+    document.head.appendChild(s);
+  });
+  return _scriptPromises[src];
+}
+var _pdfjsPromise = null;
+function loadPdfJs() {
+  if (window.pdfjsLib) return Promise.resolve(window.pdfjsLib);
+  if (_pdfjsPromise) return _pdfjsPromise;
+  _pdfjsPromise = Promise.resolve()
+    .then(function () { return import("https://cdnjs.cloudflare.com/ajax/libs/pdf.js/" + PDFJS_VERSION + "/pdf.min.mjs"); })
+    .then(function (mod) {
+      window.pdfjsLib = mod;
+      mod.GlobalWorkerOptions.workerSrc = "https://cdnjs.cloudflare.com/ajax/libs/pdf.js/" + PDFJS_VERSION + "/pdf.worker.min.mjs";
+      return mod;
+    })
+    .catch(function () {
+      _pdfjsPromise = null;
+      throw new Error("Could not load the PDF reader — check your internet connection and try again.");
+    });
+  return _pdfjsPromise;
+}
+function loadMammoth() {
+  if (window.mammoth) return Promise.resolve();
+  return loadScriptTag("https://cdnjs.cloudflare.com/ajax/libs/mammoth/" + MAMMOTH_VERSION + "/mammoth.browser.min.js");
+}
+
+function readTextFile(file) {
+  return new Promise(function (resolve, reject) {
+    var reader = new FileReader();
+    reader.onload = function () { resolve(String(reader.result || "")); };
+    reader.onerror = function () { reject(new Error("Could not read that file.")); };
+    reader.readAsText(file);
+  });
+}
+
+function extractPdfText(file) {
+  return loadPdfJs().then(function (pdfjsLib) {
+    return file.arrayBuffer().then(function (buf) {
+      return pdfjsLib.getDocument({ data: buf }).promise;
+    });
+  }).then(function (pdf) {
+    var pageTexts = [];
+    var chain = Promise.resolve();
+    var addPage = function (pageNum) {
+      chain = chain.then(function () {
+        return pdf.getPage(pageNum)
+          .then(function (page) { return page.getTextContent(); })
+          .then(function (tc) {
+            var lines = [], currentY = null, currentLine = [];
+            tc.items.forEach(function (item) {
+              var y = Math.round(item.transform[5]);
+              if (currentY === null || Math.abs(y - currentY) > 2) {
+                if (currentLine.length) lines.push(currentLine.join(" "));
+                currentLine = [item.str];
+                currentY = y;
+              } else {
+                currentLine.push(item.str);
+              }
+            });
+            if (currentLine.length) lines.push(currentLine.join(" "));
+            pageTexts.push(lines.join("\n"));
+          });
+      });
+    };
+    for (var i = 1; i <= pdf.numPages; i++) addPage(i);
+    return chain.then(function () { return pageTexts.join("\n\n"); });
+  }).catch(function (err) {
+    var msg = (err && err.message) || "";
+    if (/password/i.test(msg)) throw new Error("That PDF is password-protected — remove the password and try again.");
+    throw new Error(msg || "Could not read that PDF.");
+  });
+}
+
+/* Minimal HTML -> Markdown conversion for mammoth's output (p, h1-6, lists,
+   bold/italic/code, links, blockquotes). Good enough as an imported starting
+   point — the person reviews and tidies up the result before publishing. */
+function htmlToMarkdown(html) {
+  var doc = new DOMParser().parseFromString(html, "text/html");
+  function inline(node) {
+    var out = "";
+    Array.prototype.forEach.call(node.childNodes, function (n) {
+      if (n.nodeType === 3) { out += n.textContent; return; }
+      var tag = n.tagName ? n.tagName.toLowerCase() : "";
+      if (tag === "strong" || tag === "b") out += "**" + inline(n) + "**";
+      else if (tag === "em" || tag === "i") out += "*" + inline(n) + "*";
+      else if (tag === "code") out += "`" + inline(n) + "`";
+      else if (tag === "a") out += "[" + inline(n) + "](" + (n.getAttribute("href") || "") + ")";
+      else if (tag === "br") out += "\n";
+      else out += inline(n);
+    });
+    return out;
+  }
+  function block(node) {
+    var out = "";
+    Array.prototype.forEach.call(node.childNodes, function (n) { out += nodeToMd(n); });
+    return out;
+  }
+  function nodeToMd(n) {
+    if (n.nodeType === 3) {
+      var t = n.textContent.trim();
+      return t ? t + "\n\n" : "";
+    }
+    if (n.nodeType !== 1) return "";
+    var tag = n.tagName.toLowerCase();
+    if (/^h[1-6]$/.test(tag)) {
+      var level = Math.min(parseInt(tag[1], 10) + 1, 6);
+      var txt = inline(n).trim();
+      return txt ? new Array(level + 1).join("#") + " " + txt + "\n\n" : "";
+    }
+    if (tag === "p") { var p = inline(n).trim(); return p ? p + "\n\n" : ""; }
+    if (tag === "ul") {
+      var items = "";
+      Array.prototype.forEach.call(n.children, function (li) {
+        if (li.tagName && li.tagName.toLowerCase() === "li") items += "- " + inline(li).trim() + "\n";
+      });
+      return items ? items + "\n" : "";
+    }
+    if (tag === "ol") {
+      var i2 = 1, items2 = "";
+      Array.prototype.forEach.call(n.children, function (li) {
+        if (li.tagName && li.tagName.toLowerCase() === "li") { items2 += i2 + ". " + inline(li).trim() + "\n"; i2++; }
+      });
+      return items2 ? items2 + "\n" : "";
+    }
+    if (tag === "blockquote") { var bq = inline(n).trim(); return bq ? "> " + bq + "\n\n" : ""; }
+    if (tag === "pre") return "```\n" + n.textContent.replace(/\n+$/, "") + "\n```\n\n";
+    if (tag === "img") return "";
+    return block(n);
+  }
+  return block(doc.body).replace(/\n{3,}/g, "\n\n").trim();
+}
+
+function extractDocxMarkdown(file) {
+  return loadMammoth().then(function () {
+    return file.arrayBuffer();
+  }).then(function (buf) {
+    return window.mammoth.convertToHtml({ arrayBuffer: buf });
+  }).then(function (result) {
+    var text = htmlToMarkdown(result.value);
+    if (!text.trim()) throw new Error("Didn't find any text in that document.");
+    return text;
+  }).catch(function (err) {
+    throw new Error((err && err.message) || "Could not read that Word document.");
+  });
+}
+
+function titleFromFilename(name) {
+  var base = String(name || "").replace(/\.[^./\\]+$/, "").replace(/[_-]+/g, " ").trim();
+  return base.replace(/\w\S*/g, function (w) { return w.charAt(0).toUpperCase() + w.slice(1); });
+}
+function importFileToText(file) {
+  var ext = (file.name.split(".").pop() || "").toLowerCase();
+  if (ext === "pdf") return extractPdfText(file);
+  if (ext === "docx") return extractDocxMarkdown(file);
+  if (ext === "txt" || ext === "md" || ext === "markdown") return readTextFile(file);
+  if (ext === "doc") return Promise.reject(new Error("Old-style .doc files aren't supported — open it in Word and save as .docx, then try again."));
+  return Promise.reject(new Error("That file type isn't supported yet. Try PDF, Word (.docx), or a text/Markdown file."));
 }
 
 /* ================= Modal plumbing ================= */
@@ -364,6 +535,13 @@ function openPageModal(draft) {
     '<div class="modal">' +
       '<div class="modal-head"><h3>' + (editingPage ? "Edit page" : "New page") + '</h3><button type="button" id="pgX">' + iconSvg("x") + "</button></div>" +
       '<div class="modal-body">' +
+        (editingPage ? "" :
+        '<div class="import-row">' +
+          '<input type="file" id="pgImportInput" accept=".pdf,.docx,.txt,.md,.markdown" style="display:none;">' +
+          '<button type="button" class="btn-secondary" id="pgImportBtn">' + iconSvg("upload") + " Import from a file</button>" +
+          '<span class="hint">PDF, Word (.docx), or text/Markdown — we\'ll pull in the text so you can review and tidy it up below before publishing.</span>' +
+          '<div class="form-error" id="pgImportErr"></div>' +
+        "</div>") +
         '<div class="field-row">' +
           '<div class="field"><label>Title</label><input type="text" id="pgTitle" placeholder="e.g. Resetting a locked account" value="' + esc(draft.title || "") + '"></div>' +
           '<div class="field"><label>Category</label><select id="pgCat"></select></div>' +
@@ -388,6 +566,14 @@ function openPageModal(draft) {
     pendingPageDraft.__editingPage = editingPage;
     openCategoryModal(true);
   };
+  if (!editingPage) {
+    document.getElementById("pgImportBtn").onclick = function () { document.getElementById("pgImportInput").click(); };
+    document.getElementById("pgImportInput").addEventListener("change", function (e) {
+      var file = e.target.files && e.target.files[0];
+      e.target.value = "";
+      if (file) handleImportFile(file);
+    });
+  }
   document.getElementById("pgSave").onclick = function () {
     var d = readPageDraft();
     var errEl = document.getElementById("pgErr");
@@ -419,6 +605,27 @@ function readPageDraft() {
     tags: document.getElementById("pgTags").value.trim(),
     content: document.getElementById("pgContent").value
   };
+}
+function handleImportFile(file) {
+  var errEl = document.getElementById("pgImportErr");
+  var btn = document.getElementById("pgImportBtn");
+  if (!errEl || !btn) return;
+  errEl.className = "form-error";
+  var original = btn.innerHTML;
+  btn.disabled = true;
+  btn.innerHTML = '<span class="spinner dark"></span> Reading ' + esc(file.name) + "…";
+  importFileToText(file).then(function (text) {
+    btn.disabled = false; btn.innerHTML = original;
+    var titleEl = document.getElementById("pgTitle");
+    if (titleEl && !titleEl.value.trim()) titleEl.value = titleFromFilename(file.name);
+    var contentEl = document.getElementById("pgContent");
+    if (contentEl) { contentEl.value = text.trim(); contentEl.focus(); }
+    toast("Imported " + file.name + " — review the content before publishing.");
+  }).catch(function (err) {
+    btn.disabled = false; btn.innerHTML = original;
+    errEl.textContent = (err && err.message) || "Could not read that file.";
+    errEl.className = "form-error show";
+  });
 }
 function tagsFromInput(tags) {
   return tags ? tags.split(",").map(function (t) { return t.trim(); }).filter(Boolean) : [];
